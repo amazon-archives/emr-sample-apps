@@ -1,0 +1,102 @@
+<?xml version="1.0"?>
+
+<!--
+
+  -->
+
+<project name="cloudfront-loganalyzer" default="build" basedir=".">
+
+
+  <property name="src.dir" location="${basedir}/src/logprocessor"/>
+  <property name="package.name" location="logprocessor"/>
+  <available file="${src.dir}" type="dir" property="main.available"/>
+  <property name="lib.dir" location="${basedir}/lib"/>
+  <property name="build.dir" location="${basedir}/build/"/>
+  <property name="build.classes" location="${build.dir}/classes"/>
+  <property name="build.lib" location="${build.dir}/lib"/>
+  <property name="build.test" location="${build.dir}/test"/>
+  <property name="dist" location="dist"/>
+
+  <path id="project.class.path">
+    <pathelement location="${build.classes}"/>
+    <pathelement location="${build.test}"/>
+    <fileset dir="${lib.dir}">
+      <include name="**/*.jar"/>
+    </fileset>
+  </path>
+
+  <target name="clean">
+    <echo message="cleaning..."/>
+    <delete dir="${build.dir}"/>
+    <delete dir="${dist}"/>
+    <delete dir="${ant.project.name}.tgz"/>
+  </target>
+
+  <target name="build">
+    <echo message="building..."/>
+    <mkdir dir="${build.classes}"/>
+    <mkdir dir="${lib.dir}"/>
+
+    <javac srcdir="${src.dir}" destdir="${build.classes}" verbose="off" debug="on">
+      <classpath refid="project.class.path"/>
+    </javac>
+
+    <copy todir="${build.classes}">
+      <fileset dir="${src.dir}">
+        <exclude name="**/*.java"/>
+      </fileset>
+    </copy>
+
+  </target>
+
+  <target name="build-lib">
+    <mkdir dir="${build.lib}"/>
+    <copy todir="${build.lib}" flatten="true">
+      <fileset dir="${lib.dir}"/>
+    </copy>
+  </target>
+
+  <target name="jar" depends="build,build-lib" description="creates a Hadoop ready jar will all dependencies">
+
+    <jar jarfile="${build.dir}/logprocessor.jar">
+      <fileset dir="${build.classes}"/>
+      <fileset dir="${build.dir}"> 
+        <include name="lib/*.jar"/>
+        <exclude name="lib/hadoop*"/>
+      </fileset>
+      <manifest>
+        <attribute name="Main-Class" value="logprocessor/Main"/>
+      </manifest>
+    </jar>
+
+  </target>
+
+  <target name="dist" depends="clean" description="packages current project">
+
+    <mkdir dir="${dist}"/>
+
+    <copy todir="${dist}">
+
+      <fileset dir=".">
+        <include name="data/**"/>
+        <include name="src/**"/>
+        <include name="lib/**"/>
+        <include name="build.xml"/>
+        <include name="README.TXT"/>
+        <include name="*.txt"/>
+      </fileset>
+
+    </copy>
+
+  </target>
+
+  <target name="tar" depends="dist" description="creates an archive of current project">
+    <tar destfile="${ant.project.name}.tgz"
+         compression="gzip">
+      <tarfileset dir="dist/" prefix="${ant.project.name}-1.0.0">
+        <include name="**/**"/>
+      </tarfileset>
+    </tar>
+  </target>
+
+</project>

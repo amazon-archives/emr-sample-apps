@@ -1,0 +1,21 @@
+# Copyright 2011-2013 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License"). You
+# may not use this file except in compliance with the License. A copy of
+# the License is located at
+#
+#     http://aws.amazon.com/apache2.0/
+#
+# or in the "license" file accompanying this file. This file is
+# distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF
+# ANY KIND, either express or implied. See the License for the specific
+# language governing permissions and limitations under the License.
+
+#The following query is part of an AWS article demonstrating the use of Spark and Shark on Amazon EMR: http://aws.amazon.com/articles/Elastic-MapReduce/4926593393724923
+
+#From the command line, run the following command to open the Spark shell:  SPARK_MEM="2g" /home/hadoop/spark/spark-shell
+
+val file = sc.textFile("s3://bigdatademo/sample/wiki/")
+val reducedList = file.map(l => l.split(" ")).map(l => (l(1), l(2).toInt)).reduceByKey(_+_, 3)
+reducedList.cache
+val sortedList = reducedList.map(x => (x._2, x._1)).sortByKey(false).take(50)

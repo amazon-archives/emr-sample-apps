@@ -1,0 +1,89 @@
+{ 
+    "Name": "netflix_jobflow.json", 
+    "LogUri": "s3n://<yourbucket>/[path]", 
+    "Instances": { 
+      "SlaveInstanceType":  "c1.medium",
+      "MasterInstanceType": "c1.medium", 
+            "InstanceCount":      "35", 
+            "Ec2KeyName":        "<yourkeypair>", 
+            "KeepJobFlowAliveWhenNoSteps": "false" 
+          }, 
+        "Steps": [ 
+          { 
+            "Name": "MR Step 1: Count number of ratings for each item, use single reducer", 
+            "ActionOnFailure": "TERMINATE_JOB_FLOW", 
+            "HadoopJarStep": { 
+              "Jar": "/home/hadoop/contrib/streaming/hadoop-0.18-streaming.jar", 
+              "Args": [ 
+                 "-input",     "s3n://<yourbucket>/netflix/input/", 
+                 "-output",    "s3n://<yourbucket>/netflix/item-counts/", 
+                 "-mapper",    "python similarity.py mapper1", 
+                 "-reducer",   "python similarity.py reducer1",
+                 "-cacheFile", "s3n://elasticmapreduce/samples/similarity/similarity.py#similarity.py",
+                 "-jobconf",   "mapred.map.tasks=34", 
+                 "-jobconf",   "mapred.reduce.tasks=1",     
+                 "-jobconf", "mapred.compress.map.output=true"         
+              ] 
+            } 
+          },
+          { 
+            "Name": "MR Step 2: Generate sorted item postings with KeyFieldBasedPartitioner", 
+            "ActionOnFailure": "TERMINATE_JOB_FLOW", 
+            "HadoopJarStep": { 
+              "Jar": "/home/hadoop/contrib/streaming/hadoop-0.18-streaming.jar", 
+              "Args": [ 
+                 "-input",     "s3n://<yourbucket>/netflix/input/", 
+                 "-output",    "hdfs:///home/hadoop/output2/", 
+                 "-mapper",    "python similarity.py mapper2 real", 
+                 "-reducer",   "python similarity.py reducer2",
+                 "-cacheFile",    "s3n://similarity-example/similarity.py#similarity.py",
+                 "-jobconf",   "mapred.map.tasks=136", 
+                 "-jobconf",   "mapred.reduce.tasks=68",     
+                 "-partitioner", "org.apache.hadoop.mapred.lib.KeyFieldBasedPartitioner",
+                 "-jobconf", "map.output.key.field.separator=,",
+                 "-jobconf", "num.key.fields.for.partition=1",
+                 "-jobconf", "mapred.compress.map.output=true"         
+              ] 
+            } 
+          },          
+          { 
+            "Name": "MR Step 3: Item Similarity using Random Sampling & Distributed Cache", 
+            "ActionOnFailure": "TERMINATE_JOB_FLOW", 
+            "HadoopJarStep": { 
+              "Jar": "/home/hadoop/contrib/streaming/hadoop-0.18-streaming.jar", 
+              "Args": [ 
+                 "-input",     "hdfs:///home/hadoop/output2/", 
+                 "-output",    "hdfs:///home/hadoop/output3/", 
+                 "-mapper",    "python similarity.py mapper3 96 item_rating_counts.txt", 
+                 "-reducer",   "python similarity.py reducer3 480189",
+                 "-cacheFile", "s3n://elasticmapreduce/samples/similarity/similarity.py#similarity.py",
+                 "-cacheFile",    "s3n://<yourbucket>/netflix/item-counts/part-00000#item_rating_counts.txt",             
+                 "-jobconf",   "mapred.map.tasks=136", 
+                 "-jobconf",   "mapred.reduce.tasks=68",
+                 "-jobconf", "mapred.compress.map.output=true"                          
+              ] 
+            } 
+          },
+          { 
+            "Name": "MR Step 4: For each item, emit K=25 most similar items with KeyFieldBasedPartitioner", 
+            "ActionOnFailure": "TERMINATE_JOB_FLOW", 
+            "HadoopJarStep": { 
+              "Jar": "/home/hadoop/contrib/streaming/hadoop-0.18-streaming.jar", 
+              "Args": [ 
+                 "-input",     "hdfs:///home/hadoop/output3/", 
+                 "-output",    "s3n://<yourbucket>/netflix/output-large-50/", 
+                 "-mapper",    "python similarity.py mapper4 16", 
+                 "-reducer",   "python similarity.py reducer4 25 reformatted_movie_titles.txt",
+                 "-cacheFile",    "s3n://<yourbucket>/netflix/reformatted_movie_titles.txt#reformatted_movie_titles.txt",                 
+                 "-cacheFile", "s3n://elasticmapreduce/samples/similarity/similarity.py#similarity.py",
+                 "-jobconf",   "mapred.map.tasks=136", 
+                 "-jobconf",   "mapred.reduce.tasks=68",     
+                 "-partitioner", "org.apache.hadoop.mapred.lib.KeyFieldBasedPartitioner",
+                 "-jobconf", "map.output.key.field.separator=,",
+                 "-jobconf", "num.key.fields.for.partition=1",
+                 "-jobconf", "mapred.compress.map.output=true"         
+              ] 
+            } 
+          }           
+        ] 
+      }

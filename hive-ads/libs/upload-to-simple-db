@@ -1,0 +1,544 @@
+
+# Copyright 2011-2013 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License"). You
+# may not use this file except in compliance with the License. A copy of
+# the License is located at
+#
+#     http://aws.amazon.com/apache2.0/
+#
+# or in the "license" file accompanying this file. This file is
+# distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF
+# ANY KIND, either express or implied. See the License for the specific
+# language governing permissions and limitations under the License.
+
+
+#!/usr/bin/ruby 
+
+require 'base64'
+require 'cgi'
+require 'openssl'
+require 'digest/sha1'
+require 'net/https'
+require 'time'
+require 'uri'
+require 'rexml/document'
+require 'set'
+
+class SimpleLog
+  def info(msg)
+    STDERR.puts "#{Time.now} INFO: " + msg
+  end
+  def error(msg)
+    STDERR.puts "#{Time.now} ERROR: " + msg
+  end
+end
+
+class RetryDelegator
+  attr_accessor :client, :log, :backoff_seconds, :backoff_mult, :retries, :retry_if, 
+    :pass_exceptions, :retry_exceptions
+
+  def initialize(client, options={})
+    @client            = client
+    @log               = options[:log]
+    @backoff_seconds   = options[:backoff_seconds] || 2
+    @backoff_mult      = options[:backoff_mult] || 2
+    @retries           = options[:retries] || 8
+    @retry_if          = options[:retry_if]
+    @pass_exceptions   = options[:pass_exceptions] || [ScriptError, SignalException, ArgumentError, StandardError]
+    @retry_exceptions  = options[:retry_exceptions] || [IOError, EOFError, RuntimeError, Errno::ETIMEDOUT]
+  end
+
+  def is_retry_exception(e)
+    if @retry_exceptions then
+      for retry_exception in @retry_exceptions do
+        return true if e.is_a?(retry_exception)
+      end
+    end
+    if @pass_exceptions then
+      for pass_exception in @pass_exceptions do
+        return false if e.is_a?(pass_exception)
+      end
+      return true
+    else
+      return false
+    end
+  end
+
+  def method_missing(method, *args)
+    backoff_seconds = @backoff_seconds
+    backoff_mult = @backoff_mult
+    retries_remaining = @retries
+    begin
+      response = @client.send(method, *args)
+      if @retry_if && @retry_if.call(response) then
+        raise "Retriable invalid response returned from #{method}: #{response.inspect}"
+      end
+      return response
+    rescue Exception => e
+      if retries_remaining > 0 && is_retry_exception(e) then
+        if @log != nil then
+          @log.info "Exception #{e.to_str} while calling #{method} on #{@client.class}, retrying in #{@backoff_seconds * backoff_mult} seconds"
+        end
+        sleep(@backoff_seconds * backoff_mult)
+        backoff_mult *= 2
+        retries_remaining -= 1
+        retry
+      else
+        if @log != nil then
+          @log.info "Exception #{e.to_str} while calling #{method} on #{@client.class}, failing: #{e.backtrace.join("\n")}"
+        end
+        raise e
+      end
+    end
+  end
+end
+
+# A protohash is a sequence of hashmaps normally storing configuration
+# lookup proceeds from the first hashmap to the last returning the value
+# from the first hashmap that has a value.
+#
+# Setting an element on a protohash set that value in the first
+# hashmap on the list. If the list is empty then an empty hashmap is
+# pushed and the value stored.
+
+class ProtoHash
+  def initialize(*hashes)
+    @hashes = hashes
+  end
+
+  def [](key)
+    for index in 0 ... @hashes.size do
+      value = @hashes[index][key]
+      return value if value != nil
+    end
+    return nil
+  end
+
+  def []=(key, value)
+    if @hashes.size == 0 then
+      @hashes << {}
+    end
+    @hashes[0][key] = value
+  end
+end
+
+# Certificates
+ADD YOUR CERT HERE
+-----END CERTIFICATE-----
+EOF
+
+module Amazon
+
+  module AWS
+
+    class CACertsFile
+      def initialize
+        File.open("cacerts.pem", "w") do |file|
+          file.write(CA_CERTS)
+        end
+        @filename = "cacerts.pem"
+      end
+
+      def filename
+        @filename
+      end
+    end
+
+    def self.raise_client_exception(body)
+      body_doc = REXML::Document.new(body)
+      code = nil
+      REXML::XPath.each(body_doc, "//Code") do |code_elem|
+        code = code_elem.text
+        if ( code == "ServiceUnavailable" ) then
+          raise ServiceUnavailable.new(code, body)
+        end
+      end
+      raise ClientException.new(code, body)
+    end
+
+    class ClientException < Exception
+      attr_accessor :code, :body
+      
+      def initialize(code, body)
+        super(body)
+        @code = code
+        @body = body
+      end
+
+      def to_s
+        "ClientException: response.code=#{@code}, body=#{@body}"
+      end
+    end
+    
+    class ServiceUnavailable < ClientException
+      def initialize(code, body)
+        super(code, body)
+      end
+    end
+    
+    class ParameterException < Exception
+      def initialize(message)
+        super(message)
+      end
+    end
+    
+    class Client
+      attr_accessor :verbose
+      
+      DEFAULT_CONFIG = {
+        :user_agent        => 'sdb-example-client-ruby',
+        :aws_access_id     => '',
+        :aws_secret_key    => '',
+      }
+
+      @ca_file = CACertsFile.new
+
+      def self.ca_file
+        @ca_file
+      end
+
+      def initialize(config)
+        ensure_keys(config, :aws_access_id, :aws_secret_key)
+        @config = ProtoHash.new({}, config , DEFAULT_CONFIG)
+        @config[:endpoint] = URI.parse(@config[:endpoint]) if @config[:endpoint].is_a?(String)
+        @uri = @config[:endpoint]
+        @http = Net::HTTP.new(@uri.host, @uri.port)
+        @http.use_ssl = @uri.scheme == 'https'
+        @http.verify_mode = OpenSSL::SSL::VERIFY_PEER
+        @http.ca_file = Client.ca_file.filename
+      end
+
+      def make_request(action, params)
+        @http.start do |http|
+          params.merge!(
+                        "Action"           => action, 
+                        "SignatureVersion" => "2", 
+                        "SignatureMethod"  => "HmacSHA1", 
+                        "AWSAccessKeyId"   => @config[:aws_access_id],
+                        "Version"          => @config[:api_version], 
+                        "Timestamp"        => timestamp
+                        )
+          request_uri = "/"
+          sig = get_aws_auth_param('GET', @uri.host, request_uri, params, @config[:aws_secret_key])
+          
+          path = "?" + params.sort.collect do |param|
+            esc(param[0]) + "=" + esc(param[1])
+          end.join("&") + "&Signature=" + sig
+          
+          puts path if @verbose
+          
+          req = Net::HTTP::Get.new("/#{path}")
+
+          req['Content-Type'] ||= ''
+          req['User-Agent']   = @config[:user_agent] 
+          response = http.request(req, nil)
+
+          if response.code != "200" then
+            Amazon::AWS::raise_client_exception(response.body)
+          else
+            doc = REXML::Document.new(response.body)
+            array = []
+            doc.elements.each do |elem|
+              array << xml_to_json(elem) if elem.kind_of?(REXML::Element)
+            end
+            array
+          end
+        end
+      end
+
+      def xml_to_json(parent)
+        array  = []
+        struct = {}
+        parent.children.each do |elem|
+          if elem.kind_of?(REXML::Element) then
+            if elem.name == "item" then
+              array << xml_to_json(elem)
+            else
+              if struct[elem.name] != nil then
+                if ! struct[elem.name].is_a?(Array) then
+                  struct[elem.name] = [ struct[elem.name] ]
+                end
+                struct[elem.name] << xml_to_json(elem)
+              else
+                struct[elem.name] = xml_to_json(elem)
+              end
+            end
+          end
+        end
+        if array.size > 0 then
+          return array
+        elsif struct.keys.size > 0 then
+          return struct
+        else
+          return parent.text
+        end
+      end
+      
+      def esc(input)
+        CGI::escape(input).gsub(/\+/, '%20')
+      end
+
+      def timestamp
+        Time.now.getutc.iso8601
+      end
+      
+      # set the Authorization header using AWS signed header authentication
+      def get_aws_auth_param(verb, host, request_uri, params, aws_secret_key)
+        string_to_sign = [verb, host, request_uri, query_string(params)].join("\n")
+        puts string_to_sign if @verbose
+        encoded_canonical = encode(aws_secret_key, string_to_sign)
+      end
+
+      def query_string(params)
+        params.sort { |p,q| p[0] <=> q[0] }.map { |p| esc(p[0]) + "=" + esc(p[1]) }.join("&")
+      end
+
+      def encode(aws_secret_key, str, urlencode=true)
+        digest = OpenSSL::Digest::Digest.new('sha1')
+        hmac   = OpenSSL::HMAC.digest(digest, aws_secret_key, str)
+        b64_hmac = Base64.encode64(hmac).strip
+
+        if urlencode
+          return esc(b64_hmac)
+        else
+          return b64_hmac
+        end
+      end
+      
+      def query_from_json(obj, path="", query={})
+        if obj.is_a? Array then
+          for index in 0 ... obj.size  do
+            query_from_json(obj[index], dot(path) + (index).to_s, query)
+          end
+        elsif obj.is_a? Hash then
+          for key, value in obj do
+            query_from_json(value, dot(path) + key, query)
+          end
+        else
+          query[path] = obj.to_s
+        end
+        return query
+      end
+      
+      def dot(path)
+        if path && path.size > 0 then
+          path + "."
+        else
+          path
+        end
+      end
+
+      def ensure_keys(hash, *keys)
+        for key in keys do
+          if hash[key].nil? then
+            raise "Missing #{key} in hash"
+          end
+        end
+      end
+
+      def accept_keys(method, hash, *keys)
+        unknown_keys = Set.new(hash.keys.to_a) - Set.new(keys)
+        if unknown_keys.size > 0 then
+          raise ParameterException.new("Invalid keys #{keys.inspect} to method named #{method}")
+        end
+      end
+
+    end
+
+  end
+end
+
+module Amazon
+  module SDB
+    
+    class Client < Amazon::AWS::Client
+      def initialize(config)
+        default_config = { 
+          :endpoint    => 'https://sdb.amazonaws.com/',
+          :api_version => '2007-11-07'
+        }
+        super(ProtoHash.new(config, default_config))
+      end
+
+      def list_domains(params={})
+        accept_keys("list_domains", params, "MaxNumberOfDomains", "NextToken")
+        make_request("ListDomains", query_from_json(params))
+      end
+
+      def create_domain(params={})
+        accept_keys("create_domain", params, "DomainName")
+        make_request("CreateDomain", query_from_json(params))
+      end
+      
+      def delete_domain(params={})
+        accept_keys("delete_domain", params, "DomainName")
+        make_request("DeleteDomain", query_from_json(params))
+      end
+      
+      def domain_metadata(params={})
+        accept_keys("domain_metadata", params, "DomainName")
+        make_request("DomainMetadata", query_from_json(params))
+      end
+      
+      def get_attributes(params={})
+        accept_keys("get_attributes", params, "ItemName", "AttributeName", "DomainName")
+        make_request("GetAttributes", query_from_json(params))
+      end
+
+      def put_attributes(params={})
+        # e.g. 'Attribute' => [ { 'Name' => 'a_name', 'Value' => 'a_value' } ]
+        # e.g. 'Attribute' => { 'a' => 'b', 'b' => 'c' }
+        accept_keys("get_attributes", params, "Attribute", "DomainName", "ItemName")
+        if params['Attribute'].is_a?(Hash) then
+          params['Attribute'] = params['Attribute'].to_a.map { |name, value| { 'Name' => name, 'Value' => value } }
+        end
+        make_request("PutAttributes", query_from_json(params))
+      end
+
+      def put(domain, name, attributes)
+        put_attributes('DomainName' => domain, 'ItemName' => name, 'Attribute' => attributes)
+      end
+
+      def get(domain, name)
+        get_attributes('DomainName' => domain, 'ItemName' => name)
+      end
+
+      def batch_put_attributes(params={})
+        # e.g. Item => [ { 'ItemName' => 'a_name', 'Attribute' => [ { 'Name' => 'a_name', 'Value' => 'a_value' } ]
+        accept_keys("batch_put_attributes", params, "Item", "DomainName")
+        if params['Item'].is_a?(Hash) then
+          params['Item'] = params['Item'].to_a.map do |item_name, attributes| 
+            { 'ItemName'   => item_name, 
+              'Attribute' => attributes.to_a.map do |name, value| 
+                { 'Name' => 'name', 'Value' => value } 
+              end
+            }
+          end
+        end
+        make_request("BatchPutAttributes", query_from_json(params))
+      end
+
+      def query(params={})
+        accept_keys("query", params, "DomainName", "MaxNumberOfItems", "NextToken", "QueryExpression")
+        make_request("Query", query_from_json(params))
+      end
+      
+      def query_with_attributes(params={})
+        accept_keys("query", params, "AttributeName", "DomainName", "MaxNumberOfItems", "NextToken", "QueryExpression")
+        make_request("QueryWithAttributes", query_from_json(params))
+      end
+      
+      def select(params={})
+        accept_keys("select", params, "SelectExpression", "NextToken")
+        make_request("Select", query_from_json(params))
+      end
+      
+    end
+    
+  end
+end
+
+module Amazon
+  module Hadoop
+    def self.xml_child_text(elem, path)
+      REXML::XPath.match(elem, path).first.text
+    end
+
+    def self.load_config_from_file(config_filenames=Dir.glob("/home/hadoop/conf/*.xml").to_a)
+      config_hash = Hash.new
+      for config_filename in config_filenames do
+        File.open(config_filename, "r") do |config_file|
+          config_doc = REXML::Document.new(config_file)
+          REXML::XPath.each(config_doc, "//property") do |property| 
+            name  = xml_child_text(property, "name")
+            value = xml_child_text(property, "value")
+            config_hash[name] = value
+          end
+        end
+      end
+      return config_hash
+    end
+  end
+end
+
+def validate_name(field_names, index)
+  result = field_names[index]
+  if result == nil || result == "" then
+    raise "Invalid name field_names=#{field_names.inspect}, index=#{index}"
+  end
+  result
+end
+
+def insert_rows(client, domain, name_prefix, name_fields, field_names, buffer)
+  items = buffer.map do |fields|
+    name_suffix = name_fields.map { |name| fields[field_names.index(name)] }.join(":")
+    h = {
+      'ItemName' => name_prefix + name_suffix,
+      'Attribute' => (0 ... field_names.size).map do |index| 
+        { 'Name' => validate_name(field_names, index), 
+          'Value' => fields[index] 
+        } 
+      end
+    }
+    h
+  end
+  begin
+    client.batch_put_attributes('DomainName' => domain, 'Item' => items)
+  rescue Exception => e
+    $stderr.puts("SimpleDB exception raised: e=#{e.inspect}, domain=#{domain.inspect}, items=#{items.inspect}")
+    raise e
+  end
+end
+
+def previous(x)
+end
+
+config = Amazon::Hadoop.load_config_from_file
+client = Amazon::SDB::Client.new(
+  :aws_access_id     => config["fs.s3.awsAccessKeyId"],
+  :aws_secret_key    => config["fs.s3.awsSecretAccessKey"] 
+)
+
+retry_client = RetryDelegator.new(client, :log => SimpleLog.new)
+retry_client.retry_exceptions << Amazon::AWS::ServiceUnavailable
+retry_client.pass_exceptions << Amazon::AWS::ClientException
+
+domain     = ARGV[0]
+name_prefix = ARGV[1]
+name_fields = ARGV[2].split(",")
+
+buffer = []
+max_buffer_size = 20
+
+begin
+  $stderr.puts client.domain_metadata('DomainName' => domain).inspect
+rescue Amazon::AWS::ClientException => e
+  $stderr.puts "Unable to get domain meta data so creating domain: #{domain}"
+  retry_client.create_domain('DomainName' => domain)
+end
+
+$stderr.puts "#{Time.now} Beginning processing rows"
+row_index = 0
+for line in STDIN do
+  if ( row_index += 1 ) % 1000 == 0 then
+    $stderr.puts "#{Time.now} Processing row #{row_index}"
+  end
+  fields = line.chomp.split(/[\001\t]+/)
+  buffer << fields
+  if buffer.size >= max_buffer_size then
+    begin
+      insert_rows(retry_client, domain, name_prefix, name_fields, ARGV[3..-1], buffer)
+    rescue Exception => e
+      $stderr.puts "Error #{e.to_s} while to processing batch row_index=#{row_index}"
+      $stderr.puts e.backtrace.join("\n")
+      raise e
+    end
+    buffer = []
+  end
+end
+
+if buffer.size > 0 then
+  insert_rows(retry_client, domain, name_prefix, name_fields, ARGV[3..-1], buffer)
+end
+$stderr.puts "#{Time.now} Done"

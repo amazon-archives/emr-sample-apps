@@ -1,0 +1,21 @@
+# Copyright 2011-2013 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License"). You
+# may not use this file except in compliance with the License. A copy of
+# the License is located at
+#
+#     http://aws.amazon.com/apache2.0/
+#
+# or in the "license" file accompanying this file. This file is
+# distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF
+# ANY KIND, either express or implied. See the License for the specific
+# language governing permissions and limitations under the License.
+
+#The following query is part of an AWS article demonstrating the use of Spark and Shark on Amazon EMR: http://aws.amazon.com/articles/Elastic-MapReduce/4926593393724923
+
+#From the command line, run the following command to launch Shark:  SPARK_MEM="2g" /home/hadoop/shark/bin/shark
+
+set mapred.reduce.tasks=10;
+create table wikistat (projectcode string, pagename string, pageviews int, pagesize int) ROW FORMAT DELIMITED FIELDS TERMINATED BY ' ' location 's3://bigdatademo/sample/wiki/';
+create table wikistats_cached as select * from wikistat;
+select pagename, sum(pageviews) c from wikistats_cached group by pagename order by c desc limit 10;
