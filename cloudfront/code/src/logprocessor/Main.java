@@ -9,6 +9,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.TimeZone;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Method;
 
 import logprocessor.enums.Columns;
 import logprocessor.reporters.FieldAggregatedReporterAssembly;
@@ -27,7 +29,6 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.mapred.JobClient;
 import org.apache.hadoop.mapred.JobConf;
-import org.apache.hadoop.tools.DistCp;
 
 import cascading.cascade.Cascade;
 import cascading.cascade.CascadeConnector;
@@ -244,17 +245,7 @@ public class Main {
         //Ignore it
       }
     }
-    DistCp distCp = new DistCp(conf);
-    String[] dcmd = new String[4];
-    dcmd[0] = "-log";
-    dcmd[1] = outputPath + "_runlogs_";
-    dcmd[2] = intermediateOut;
-    dcmd[3]= outputPath;
-    try {
-      distCp.run(dcmd);
-    } catch (Exception e) {
-      throw new RuntimeException(e);
-    }
+    copyOutput(conf, outputPath, intermediateOut);
   }
 
   private static String appendTrailingSlash(String inputPath) {
@@ -319,6 +310,45 @@ public class Main {
     options.addOption(new Option("clientIPReport","generate the Client IP report"));
     options.addOption(new Option("edgeLocationReport","generate the Edge Location report"));
     return options;
+  }
+
+  /**
+   * Copy results to output destination.
+   * 
+   * Note : Apache Hadoop DistCp tool has totally different implementations in Apache Hadoop 1 and Hadoop 2. The class name (DistCp) 
+   *        and class path (org.apache.hadoop.tools.DistCp) remain unchanged, but the constructors and implementations are different. 
+   *        Reflection is used here to make this sample code to work with both Apache Hadoop 1 and Hadoop 2.
+   */
+  private static void copyOutput(Configuration conf, String outputPath, String intermediateOut) { 
+    try {
+      Class<?> c = Class.forName("org.apache.hadoop.tools.DistCp");
+      Constructor[] ctors = c.getDeclaredConstructors();
+      Object distCp = null;
+      for (Constructor ctor : ctors) {
+        if (ctor.getGenericParameterTypes().length == 1) {
+          // Hadoop 1 
+          distCp = ctor.newInstance(conf);
+          break;
+        } else if (ctor.getGenericParameterTypes().length == 2) {
+          // Hadoop 2
+          distCp = ctor.newInstance(conf, null);
+          break;
+        }
+      }
+      if (distCp == null) {
+        throw new RuntimeException("Implementation of org.apache.hadoop.tools.DistCp dosen't have desired constructor.");
+      }
+      String[] dcmd = new String[4];
+      dcmd[0] = "-log";
+      dcmd[1] = outputPath + "_runlogs_";
+      dcmd[2] = intermediateOut;
+      dcmd[3]= outputPath;
+      Class[] argTypes = new Class[] { String[].class };
+      Method run = c.getDeclaredMethod("run", argTypes);
+      run.invoke(distCp, (Object)dcmd);
+    } catch (Exception e) {
+      throw new RuntimeException(e);
+    }
   }
 
 }
